@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Gateway ACL — declares which MCP servers the host-side gateway can spawn and which trust tiers may use them. This file is gitignored; the shipped repo includes acl.example.json as a starting template.",
+    "Use the /add-mcp-to-gateway skill (or edit this file directly + restart nanoclaw) to register an MCP.",
+    "String fields support `${env:VAR}` interpolation against the host process.env at load time — useful for install-location-dependent paths.",
+    "Secrets referenced by envFromSecrets values are looked up at spawn time from groups/_gateway/mcp-secrets.json (also gitignored). The MCP subprocess sees the env var name on the left, with the secret value pulled from the JSON key on the right."
+  ],
+  "categories": {
+    "example-filesystem": {
+      "description": "Filesystem MCP — read/write files in an allowed directory. Replace with the MCPs you actually want.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${env:HOME}/workspace"],
+      "envFromSecrets": {},
+      "envStatic": {}
+    }
+  },
+  "tierAcl": {
+    "main": ["example-filesystem"],
+    "trusted": [],
+    "untrusted": []
+  }
+}
