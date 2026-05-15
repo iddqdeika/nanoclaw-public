@@ -65,7 +65,10 @@ export function stopContainer(name: string): void {
   // -t 3 gives the agent-runner's SIGTERM handler time to flush any
   // in-flight turn_metrics before docker escalates to SIGKILL. Previously
   // -t 1 caused token-usage stats for thrash timeouts to be lost entirely.
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 3 ${name}`, { stdio: 'pipe' });
+  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 3 ${name}`, {
+    stdio: 'pipe',
+    windowsHide: true,
+  });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
@@ -74,6 +77,7 @@ export function ensureContainerRuntimeRunning(): void {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
       timeout: 10000,
+      windowsHide: true,
     });
     logger.debug('Container runtime already running');
   } catch (err) {
@@ -113,7 +117,11 @@ export function cleanupOrphans(): void {
   try {
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format {{.Names}}`,
-      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+        windowsHide: true,
+      },
     );
     const orphans = output.trim().split('\n').filter(Boolean);
     for (const name of orphans) {
