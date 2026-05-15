@@ -39,3 +39,10 @@ groups/_gateway/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Per-installation PM2 overrides (the canonical files are
+# ecosystem.config.cjs and start-nanoclaw.cjs). Use a different filename
+# locally if you need custom ports / cwd / process name.
+ecosystem.*.config.cjs
+start-*.cjs
+!start-nanoclaw.cjs
