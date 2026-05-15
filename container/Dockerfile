@@ -44,10 +44,6 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Install agent-browser, claude-code, and GitLab MCP (stdio) globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code @zereight/mcp-gitlab
 
-# Vendor MCP servers not available on npm (e.g. private gitlab). Build inline.
-COPY vendor/feeds-mcp /opt/feeds-mcp
-RUN cd /opt/feeds-mcp && npm install --omit=dev && npm install typescript && npx tsc && rm -rf node_modules && npm install --omit=dev
-
 # Create app directory
 WORKDIR /app
 
