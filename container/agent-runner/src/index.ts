@@ -93,6 +93,7 @@ const TOOLS_BY_TRUST: Record<string, string[]> = {
     'mcp__grafana__*', 'mcp__grafana2__*',
     'mcp__clickhouse__*', 'mcp__gitlab__*',
     'mcp__feeds__*',
+    'mcp__playwright__*',
     // MCP Gateway A/B path — when MCP_GATEWAY_TOKEN is set, the gateway
     // shim replaces the 6 direct entries above and exposes meta-tools
     // plus dynamically-activated category tools.
@@ -107,6 +108,7 @@ const TOOLS_BY_TRUST: Record<string, string[]> = {
     'mcp__grafana__*', 'mcp__grafana2__*',
     'mcp__clickhouse__*', 'mcp__gitlab__*',
     'mcp__feeds__*',
+    'mcp__playwright__*',
     'mcp__gateway__*',
   ],
   untrusted: [
@@ -629,6 +631,19 @@ async function runQuery(
             },
           },
         };
+        if (trustLevel === 'main' || trustLevel === 'trusted') {
+          servers.playwright = {
+            command: 'playwright-mcp',
+            args: [
+              '--browser', 'chromium',
+              '--executable-path', '/usr/bin/chromium',
+              '--headless',
+              '--isolated',
+              '--no-sandbox',
+            ],
+            env: {},
+          };
+        }
         // Gateway is the only supported path for external MCPs. Register
         // additional MCPs via /add-mcp-to-gateway (edits groups/_gateway/acl.json).
         // Groups with useMcpGateway:false (legacy) get the built-in `nanoclaw`
