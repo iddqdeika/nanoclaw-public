@@ -20,7 +20,10 @@ vi.mock('os', async () => {
   const actual = await vi.importActual<typeof import('os')>('os');
   return {
     ...actual,
-    default: { ...actual, homedir: () => '/tmp/nanoclaw-credential-proxy-test-home' },
+    default: {
+      ...actual,
+      homedir: () => '/tmp/nanoclaw-credential-proxy-test-home',
+    },
     homedir: () => '/tmp/nanoclaw-credential-proxy-test-home',
   };
 });
@@ -202,5 +205,35 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('LLM_BACKEND=openrouter routes to OPENROUTER_BASE_URL and injects Bearer', async () => {
+    Object.assign(mockEnv, {
+      LLM_BACKEND: 'openrouter',
+      OPENROUTER_API_KEY: 'sk-or-test-key',
+      OPENROUTER_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+      // anthropic creds still present — should be ignored when backend=openrouter
+      ANTHROPIC_API_KEY: 'sk-ant-should-be-ignored',
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer sk-or-test-key');
+    // x-api-key (Anthropic-native) must NOT leak through to OpenRouter
+    expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
   });
 });

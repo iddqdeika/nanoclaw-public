@@ -1,16 +1,18 @@
 /**
  * Credential proxy for container isolation.
- * Containers connect here instead of directly to the Anthropic API.
+ * Containers connect here instead of directly to the LLM provider.
  * The proxy injects real credentials so containers never see them.
  *
- * Two auth modes:
- *   API key:  Proxy injects x-api-key on every request.
- *   OAuth:    Reads access/refresh tokens from ~/.claude/.credentials.json.
- *             Auto-refreshes the access token when it nears expiry.
- *             Container CLI exchanges its placeholder token for a temp
- *             API key via /api/oauth/claude_cli/create_api_key.
- *             Proxy injects real OAuth token on that exchange request;
- *             subsequent requests carry the temp key which is valid as-is.
+ * Two backends:
+ *   anthropic (default): forwards to api.anthropic.com. Two auth modes —
+ *     API key (inject x-api-key) or OAuth (refresh & inject Bearer on
+ *     /api/oauth/claude_cli/create_api_key exchange requests). Reads
+ *     OAuth tokens from ~/.claude/.credentials.json.
+ *   openrouter: forwards to openrouter.ai/api (the "Anthropic Skin"
+ *     endpoint). Auth is a single static Bearer token from
+ *     OPENROUTER_API_KEY in .env. No OAuth refresh dance.
+ *
+ * Backend selected by LLM_BACKEND env var (default 'anthropic').
  */
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
@@ -23,6 +25,12 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 export type AuthMode = 'api-key' | 'oauth';
+export type LlmBackend = 'anthropic' | 'openrouter';
+
+const BACKEND_DEFAULT_URL: Record<LlmBackend, string> = {
+  anthropic: 'https://api.anthropic.com',
+  openrouter: 'https://openrouter.ai/api',
+};
 
 export interface ProxyConfig {
   authMode: AuthMode;
@@ -153,15 +161,37 @@ export function startCredentialProxy(
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
+    'LLM_BACKEND',
+    'OPENROUTER_API_KEY',
+    'OPENROUTER_BASE_URL',
   ]);
 
-  const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
+  const backend: LlmBackend =
+    secrets.LLM_BACKEND === 'openrouter' ? 'openrouter' : 'anthropic';
+
+  // authMode only meaningful for the anthropic backend; openrouter uses a
+  // static Bearer token and skips the OAuth dance entirely.
+  const authMode: AuthMode =
+    backend === 'openrouter'
+      ? 'api-key'
+      : secrets.ANTHROPIC_API_KEY
+        ? 'api-key'
+        : 'oauth';
 
   const upstreamUrl = new URL(
-    secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+    backend === 'openrouter'
+      ? secrets.OPENROUTER_BASE_URL || BACKEND_DEFAULT_URL.openrouter
+      : secrets.ANTHROPIC_BASE_URL || BACKEND_DEFAULT_URL.anthropic,
   );
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
+
+  const openrouterKey = secrets.OPENROUTER_API_KEY || '';
+  if (backend === 'openrouter' && !openrouterKey) {
+    logger.error(
+      'LLM_BACKEND=openrouter set but OPENROUTER_API_KEY is empty; container LLM calls will fail with 401',
+    );
+  }
 
   // OAuth state: mutable, refreshed as needed
   let oauthToken =
@@ -262,7 +292,16 @@ export function startCredentialProxy(
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
 
-        if (authMode === 'api-key') {
+        if (backend === 'openrouter') {
+          // OpenRouter expects Authorization: Bearer <key> on every
+          // request. Strip whatever the container sent (x-api-key or a
+          // placeholder Bearer) and inject the real key.
+          delete headers['x-api-key'];
+          delete headers['authorization'];
+          if (openrouterKey) {
+            headers['authorization'] = `Bearer ${openrouterKey}`;
+          }
+        } else if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
@@ -310,7 +349,10 @@ export function startCredentialProxy(
     });
 
     server.listen(port, host, () => {
-      logger.info({ port, host, authMode }, 'Credential proxy started');
+      logger.info(
+        { port, host, backend, authMode, upstream: upstreamUrl.host },
+        'Credential proxy started',
+      );
       resolve(server);
     });
 
