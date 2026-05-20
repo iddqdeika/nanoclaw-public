@@ -76,6 +76,14 @@ export const MEMORY_SOURCES: MemorySource[] = [
     globPattern: '**/*.md',
   },
   {
+    id: 'group-memory',
+    description:
+      "Group's memory/ directory — accumulating notes the agent writes per rules/core/group-memory.md (people, cases, preferences, synonyms, …).",
+    scope: 'group',
+    pathFor: (g) => path.join(GROUPS_DIR, g, 'memory'),
+    globPattern: '**/*.md',
+  },
+  {
     id: 'global-memory',
     description:
       'Global memory — domain-organized markdown under groups/global/memory/. Top-level files are visible to everyone; subfolder files are domain-tagged.',
