@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { STORE_DIR } from './config.js';
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 /**
@@ -13,9 +14,15 @@ import { logger } from './logger.js';
  * override the SDK default up-front — we only supply explicit models for
  * retries.
  *
- * `NANOCLAW_MODEL_PRIORITY` (env) overrides the default chain. Format:
- * comma-separated model IDs, fallback order. Do not include the SDK
- * default model in the chain — it's already the first attempt.
+ * `NANOCLAW_MODEL_PRIORITY` overrides the default chain (read first from
+ * .env, then from process.env). Format: comma-separated model IDs,
+ * fallback order. Do not include the SDK default model in the chain —
+ * it's already the first attempt.
+ *
+ * When LLM_BACKEND=openrouter the default chain uses OpenRouter slugs
+ * (provider-prefixed: `anthropic/claude-haiku-4.5`, etc.). For
+ * Anthropic-direct the bare names are used. Either way the env override
+ * takes precedence and is passed verbatim to the SDK.
  *
  * Exhaustion state lives on disk at `store/model-exhaustion.json` so it
  * survives container + orchestrator restarts. `markExhausted` is called
@@ -25,15 +32,34 @@ import { logger } from './logger.js';
 
 const EXHAUSTION_FILE = path.join(STORE_DIR, 'model-exhaustion.json');
 
-export const DEFAULT_FALLBACK_CHAIN = ['claude-haiku-4-5', 'claude-opus-4-7'];
+const DEFAULT_FALLBACK_CHAINS: Record<'anthropic' | 'openrouter', string[]> = {
+  anthropic: ['claude-haiku-4-5', 'claude-opus-4-7'],
+  openrouter: ['anthropic/claude-haiku-4.5', 'anthropic/claude-opus-4.7'],
+};
+
+/**
+ * Back-compat export — defaults to the Anthropic-direct chain. New code
+ * should call `getFallbackChain()` which is backend-aware.
+ */
+export const DEFAULT_FALLBACK_CHAIN = DEFAULT_FALLBACK_CHAINS.anthropic;
+
+function activeBackend(): 'anthropic' | 'openrouter' {
+  const envFile = readEnvFile(['LLM_BACKEND']);
+  const value = process.env.LLM_BACKEND || envFile.LLM_BACKEND || 'anthropic';
+  return value === 'openrouter' ? 'openrouter' : 'anthropic';
+}
 
 function rawChain(): string[] {
-  const env = process.env.NANOCLAW_MODEL_PRIORITY;
-  if (!env) return DEFAULT_FALLBACK_CHAIN;
-  return env
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const envFile = readEnvFile(['NANOCLAW_MODEL_PRIORITY']);
+  const override =
+    process.env.NANOCLAW_MODEL_PRIORITY || envFile.NANOCLAW_MODEL_PRIORITY;
+  if (override) {
+    return override
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return DEFAULT_FALLBACK_CHAINS[activeBackend()];
 }
 
 type ExhaustionMap = Record<string, string | null>;
