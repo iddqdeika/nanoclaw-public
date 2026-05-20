@@ -593,6 +593,31 @@ async function runQuery(
   let rateLimited: RateLimitHit | undefined;
   let outputEmitted = false;
 
+  // GLM-shim accumulator. Z.AI GLM models (via OpenRouter's Anthropic
+  // Skin) emit assistant content blocks in the order [text,
+  // thinking, redacted_thinking]. The SDK extracts result.result by
+  // picking the LAST content block of the LAST assistant message; for
+  // GLM that's redacted_thinking which has no text → result is empty
+  // and the user gets nothing. GLM also ignores `thinking: { type:
+  // 'disabled' }` (Anthropic-specific flag), so the only fix is host-
+  // side: walk every assistant event of the turn, concat any text
+  // blocks ourselves, and substitute when the SDK result is empty.
+  // Scoped to GLM (model id starts with `z-ai/glm`) — for Anthropic
+  // and other providers the SDK result is the source of truth.
+  const glmTextBlocks: string[] = [];
+  let turnSawGlm = false;
+
+  // OpenRouter quirk (LLM_BACKEND=openrouter on host, propagated to
+  // container as env): the Anthropic Skin on OR — at least via Bedrock
+  // routing for Claude 4.x — returns assistant content blocks in the
+  // order [thinking, text, redacted_thinking]. The SDK accumulates the
+  // last text block as the final result, but treats redacted_thinking
+  // as a non-text terminator and resets the accumulator — empty result
+  // surfaces to the user. Disabling extended thinking sidesteps the
+  // whole pattern: SDK gets a single text block, result is correct.
+  // Native Anthropic backend doesn't exhibit this and keeps thinking on.
+  const disableThinking = process.env.LLM_BACKEND === 'openrouter';
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -601,6 +626,7 @@ async function runQuery(
       resume: sessionId,
       resumeSessionAt: resumeAt,
       ...(model ? { model } : {}),
+      ...(disableThinking ? { thinking: { type: 'disabled' as const } } : {}),
       systemPrompt: (() => {
         const parts = [globalClaudeMd, extraSystemPromptAppend].filter(
           (x): x is string => typeof x === 'string' && x.length > 0,
@@ -776,9 +802,18 @@ async function runQuery(
           cache_read_input_tokens?: number;
           output_tokens?: number;
         };
-        content?: Array<{ type?: string; name?: string }>;
+        content?: Array<{ type?: string; name?: string; text?: string }>;
       } }).message;
       if (m) {
+        // GLM-shim text accumulator — see comment near `glmTextBlocks` decl.
+        if (m.model && m.model.startsWith('z-ai/glm')) {
+          turnSawGlm = true;
+          for (const block of m.content ?? []) {
+            if (block.type === 'text' && block.text) {
+              glmTextBlocks.push(block.text);
+            }
+          }
+        }
         const toolUseNames: string[] = [];
         for (const block of m.content ?? []) {
           if (block.type === 'tool_use' && block.name) {
@@ -823,8 +858,23 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult =
+      let textResult =
         'result' in message ? (message as { result?: string }).result : null;
+      // GLM shim: SDK leaves result empty because the LAST content block
+      // of the LAST assistant message is redacted_thinking. Substitute
+      // our accumulated text blocks. Only fires when (a) the turn used
+      // a GLM model and (b) SDK gave us nothing — preserves SDK output
+      // for any future GLM build that behaves correctly.
+      if (
+        turnSawGlm &&
+        (!textResult || textResult.length === 0) &&
+        glmTextBlocks.length > 0
+      ) {
+        textResult = glmTextBlocks.join('');
+        log(
+          `Result #${resultCount}: GLM shim — substituting ${glmTextBlocks.length} text block(s), ${textResult.length} chars`,
+        );
+      }
       log(
         `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''} tokens=in:${turnUsage.input_tokens}+cc:${turnUsage.cache_creation_tokens}+cr:${turnUsage.cache_read_tokens}+out:${turnUsage.output_tokens} tools=${turnUsage.tool_call_count}`,
       );
@@ -835,6 +885,9 @@ async function runQuery(
         usage: turnUsage,
       });
       if (textResult) outputEmitted = true;
+      // Reset per-turn GLM state alongside usage/dedupe.
+      glmTextBlocks.length = 0;
+      turnSawGlm = false;
       turnUsage = emptyUsage();
       turnDedupe = emptyDedupe();
       activeTurnUsage = turnUsage;

@@ -427,7 +427,15 @@ function buildContainerArgs(
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
     'ANTHROPIC_DEFAULT_OPUS_MODEL',
     'CLAUDE_CODE_SUBAGENT_MODEL',
+    'LLM_BACKEND',
   ]);
+
+  // Tell agent-runner which backend it's effectively talking to. The
+  // runner uses this to apply OR-specific quirks (e.g. disabling
+  // extended thinking; see the disableThinking gate in
+  // container/agent-runner/src/index.ts).
+  const backend = envOverrides.LLM_BACKEND || process.env.LLM_BACKEND;
+  if (backend) args.push('-e', `LLM_BACKEND=${backend}`);
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
