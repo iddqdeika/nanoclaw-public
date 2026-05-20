@@ -59,36 +59,9 @@ Default new entries to `⚠️ неапрув` unless the user said the thing in
 
 ## How recall works (so you can trust what you see)
 
-The prefill step (host-side, `src/memory/prefill.ts`) builds a `<recall>` block from the latest user message:
+Before each turn, the host-side prefill step builds a `<recall>` block from the latest user message: it semantic-searches the indexed memory and injects the matched chunks into the system prompt. Tier filter applies — `untrusted` always sees an empty block; `main`/`trusted` see both per-group and global hits.
 
-1. Embed the user text via an OpenAI-compatible `/v1/embeddings` endpoint.
-2. Vector-search the index store (`data/memory/{group}/chunks.lance`) for top-k matches across the tier's allowed scopes.
-3. Filter by **tier**: `untrusted` → empty block; `main`/`trusted` → group + global hits.
-4. Inject the matched chunks into the system prompt before your first turn.
-
-The indexer only re-embeds files when their mtime changes (cache: `store/embedding_cache.db`). Edit → save → it's in the next recall after the next reindex tick.
-
-### Embedding endpoint configuration
-
-Configured via env vars in `.env` (read by `src/memory/embed.ts`):
-
-| Variable | Default | Notes |
-|---|---|---|
-| `EMBEDDING_BASE_URL` | `http://127.0.0.1:1234/v1` | OpenAI-compatible `/v1/embeddings` base |
-| `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v1.5@q8_0` | Must match what the endpoint serves |
-| `EMBEDDING_DIM` | `768` | Output dim. Matryoshka-truncated (truncate + L2 normalize) if model emits larger |
-| `EMBEDDING_API_KEY` | empty | Sent as `Authorization: Bearer …` if set; not needed for local endpoints |
-
-If the endpoint is unreachable, embeds throw. Indexer skips affected files (logs warn, increments `errors`). Prefill catches the throw and falls back to an **empty `<recall>` block** — you still answer, just without memory context. There is **no automatic provider fallback**: the URL in env is the one used.
-
-Supported setups (all OpenAI-compatible, choose one):
-
-- **LM Studio** (default) — local app, GUI for model management. Defaults above work out of the box once you load `text-embedding-nomic-embed-text-v1.5@q8_0`.
-- **Ollama** — fully local, CLI-driven. Setup: `ollama serve` + `ollama pull nomic-embed-text`. In `.env`: `EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1`, `EMBEDDING_MODEL=nomic-embed-text`. Free, ~300 MB on disk.
-- **OpenAI** (paid) — hosted, fast. In `.env`: `EMBEDDING_BASE_URL=https://api.openai.com/v1`, `EMBEDDING_MODEL=text-embedding-3-small`, `EMBEDDING_DIM=1536`, `EMBEDDING_API_KEY=sk-…`. ~$0.02 per 1M input tokens at time of writing.
-- **Voyage / Together / vLLM / llama.cpp / …** — any OpenAI-compatible `/v1/embeddings` endpoint works; set URL + model + (optional) API key accordingly.
-
-Once a file is embedded, the vector lives in `store/embedding_cache.db` keyed by `(model, dim, text)` hash. Subsequent runs with the same model don't re-call the endpoint until the file content changes — so a momentarily-offline endpoint doesn't lose existing recall, only new writes.
+The block can be empty (e.g. the embedding endpoint is down on the host). When that happens, `Read` the memory file directly to answer; don't assume "no recall = no memory".
 
 ## How to recall
 
