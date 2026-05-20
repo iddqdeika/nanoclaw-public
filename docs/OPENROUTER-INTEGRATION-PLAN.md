@@ -188,10 +188,41 @@ Decision: probably skip for v1, OR dashboard is enough.
 - Cost-aware automatic model selection (cheapest model that meets task).
 - Replacing the credential proxy with OneCLI gateway for LLM calls.
 
+## Phase 0 findings (2026-05-20)
+
+Target model: `z-ai/glm-4.6v` (user-selected). Endpoint: `https://openrouter.ai/api/v1/messages` (Anthropic Skin). Header set: `Authorization: Bearer <OR_KEY>`, `anthropic-version: 2023-06-01`, `Content-Type: application/json`. All four tests against GLM, no Claude reference run (Anthropic 1P via OR is trivially equivalent to Anthropic-direct).
+
+| Test | Outcome | Notes |
+|---|---|---|
+| A — plain text generation | ✅ | Response shape is fully Anthropic-native: `{type:"message", role:"assistant", content:[...], stop_reason, usage}`. GLM additionally emits a `type:"thinking"` block even without explicit thinking config — extended-thinking semantics pass through. |
+| B — tool use | ✅ | `content` includes `{type:"tool_use", id, name, input}` blocks in Anthropic shape. Tool `id` format is OpenAI-flavored (`call_xxx…`) rather than Anthropic's `toolu_xxx`, but the SDK treats it as opaque so this is harmless. Also got `redacted_thinking` blocks alongside — OR's Anthropic Skin handles them. |
+| C — streaming (SSE) | ✅ | Native Anthropic event sequence: `message_start` → `content_block_start` → `content_block_delta` (with `delta.type === "thinking_delta"` for thinking, `text_delta` for text) → `content_block_stop` → `message_stop`. Provider tag in `message_start`: `"provider":"Z.AI"`. SDK should parse identically to Anthropic-1P. |
+| D — prompt caching | ⚠️ partial | `cache_control:{type:"ephemeral"}` on a `system` block is accepted (no error). Response `usage.cache_read_input_tokens: 4`, but `cache_creation_input_tokens: null`. So the hint is honored on the wire but the actual savings shape is GLM-provider-specific. Bonus: OR returns inline `cost: 0.0002696` per request — enables Phase 5 cost-tracking without an extra `GET /generation` round trip. |
+
+**Verdict:** Phase 1 is safe to start. GLM 4.6v through Anthropic Skin produces SDK-compatible responses across text, tools, streaming, and prompt-cache hints. No parallel non-SDK path needed for the cases tested. Edge cases (multi-turn tool_use with continuations, MCP integration through container, session resume) still need Phase 4 to confirm at agent-loop level — Phase 0 only covered raw API shape.
+
+**Known unknowns to verify in later phases:**
+
+- GLM thinking emission is unprompted and verbose — may need to suppress for cost (Phase 4).
+- `cache_creation_input_tokens: null` means we can't currently distinguish first-write vs cache-hit for cost analytics. Acceptable for v1.
+- Z.AI provider tag in responses — should we surface to logging? (Probably yes, for the multi-provider story.)
+
+**OR-side knobs spotted that we should expose in Phase 6:**
+
+- Provider routing preferences (e.g. "Anthropic 1P only" guard) configurable per-request via `provider` field — not used in Phase 0 but documented in [OR provider routing](https://openrouter.ai/docs/features/provider-routing).
+- BYOK for some providers — out of scope but worth noting in skill.
+
 ## Decision log
 
-- 2026-05-20 — Plan drafted, branch `wip/openrouter` created. No code changes yet.
+- 2026-05-20 — Plan drafted, branch `wip/openrouter` created.
+- 2026-05-20 — Phase 0 POC run against `z-ai/glm-4.6v`. All four tests pass on the Anthropic Skin. Greenlight Phase 1.
 
 ## Next action
 
-Phase 0 POC. Needs: an OpenRouter API key with credit. Once user provides, run curl battery and update "Phase 0 findings" section here, then decide on Phase 1 secret-storage approach.
+Phase 1 — backend-aware credential proxy. Decision needed first: how to store the OpenRouter key.
+
+- **Option A**: New OneCLI secret type `openrouter` (host-pattern `openrouter.ai`). Cleanest but requires OneCLI side to know the type. Need to check whether OneCLI accepts arbitrary `--type` strings or has an enum.
+- **Option B**: Reuse the existing `anthropic` secret slot when `LLM_BACKEND=openrouter`. The proxy still pulls the secret by name, just uses it as a Bearer token. Simplest, no OneCLI change, but conflates two semantically-different keys.
+- **Option C**: Plain `.env` variable (`OPENROUTER_API_KEY`) bypassing OneCLI for this one. Reasonable for an experimental backend, less consistent with the rest of the credential story.
+
+User decision sets the shape of Phase 1.
