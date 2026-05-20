@@ -360,8 +360,16 @@ export function startCredentialProxy(
   });
 }
 
-/** Detect which auth mode the host is configured for. */
+/** Detect which auth mode the host is configured for.
+ *
+ * For LLM_BACKEND=openrouter we always return 'api-key' regardless of
+ * what Anthropic creds happen to live on the host — OR has no OAuth
+ * endpoint (`/api/oauth/claude_cli/create_api_key` doesn't exist).
+ * Containers placed in OAuth mode against OR will silently fail the
+ * exchange and then surface 'Cannot read properties of undefined' from
+ * the SDK's downstream token bookkeeping. */
 export function detectAuthMode(): AuthMode {
-  const secrets = readEnvFile(['ANTHROPIC_API_KEY']);
+  const secrets = readEnvFile(['ANTHROPIC_API_KEY', 'LLM_BACKEND']);
+  if (secrets.LLM_BACKEND === 'openrouter') return 'api-key';
   return secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
 }
