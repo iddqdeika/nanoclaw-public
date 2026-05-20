@@ -217,12 +217,42 @@ Target model: `z-ai/glm-4.6v` (user-selected). Endpoint: `https://openrouter.ai/
 - 2026-05-20 — Plan drafted, branch `wip/openrouter` created.
 - 2026-05-20 — Phase 0 POC run against `z-ai/glm-4.6v`. All four tests pass on the Anthropic Skin. Greenlight Phase 1.
 
+## Secret storage decision (Option A, refined)
+
+User chose Option A (separate OneCLI-managed secret for OR). OneCLI's `--type` is closed: only `anthropic` and `generic` accepted. Custom type would require an OneCLI patch we don't want.
+
+Workable equivalent: use the existing `generic` type with explicit injection config — host-pattern, header name, and value format are all OR-specific, so the secret lives separately from the `anthropic` slot and gets injected correctly when traffic hits `openrouter.ai`.
+
+```bash
+onecli secrets create \
+  --name OpenRouter \
+  --type generic \
+  --value <sk-or-v1-…> \
+  --host-pattern openrouter.ai \
+  --header-name Authorization \
+  --value-format "Bearer {value}"
+```
+
+Verified on this install (id `c6fc2070-41cc-4997-b166-3b7e1921a95f`). `injectionConfig` saves correctly; the only quirk is that the create-response doesn't echo the injection block back (a `secrets list` shows it). Document this in the eventual setup skill.
+
+Implication for the credential proxy: **no proxy-side auth swap needed**. OneCLI gateway already injects the right header for the right host based on the secret's `injectionConfig`. Our proxy just needs to forward to `openrouter.ai/api` when `LLM_BACKEND=openrouter`, and OneCLI does the auth header transformation. Simpler than originally planned.
+
+## Phase 1 (refined) — upstream switch only
+
+Updated scope given the OneCLI discovery:
+
+- `src/credential-proxy.ts`: read `LLM_BACKEND` env (default `anthropic`). When `openrouter`, change the upstream from `https://api.anthropic.com` to `https://openrouter.ai/api`. No header logic change — OneCLI handles auth based on the resolved secret's host-pattern.
+- `.env.example`: document `LLM_BACKEND`. Document the OneCLI command above.
+- Test: extend `credential-proxy.test.ts` with a `LLM_BACKEND=openrouter` case that asserts the upstream URL flips.
+
+That's it. Phases 2-6 unchanged.
+
+## Decision log
+
+- 2026-05-20 — Plan drafted, branch `wip/openrouter` created.
+- 2026-05-20 — Phase 0 POC run against `z-ai/glm-4.6v`. All four tests pass on the Anthropic Skin. Greenlight Phase 1.
+- 2026-05-20 — Secret storage: Option A via OneCLI `generic` type. No custom OneCLI type needed. Proxy-side auth swap not needed.
+
 ## Next action
 
-Phase 1 — backend-aware credential proxy. Decision needed first: how to store the OpenRouter key.
-
-- **Option A**: New OneCLI secret type `openrouter` (host-pattern `openrouter.ai`). Cleanest but requires OneCLI side to know the type. Need to check whether OneCLI accepts arbitrary `--type` strings or has an enum.
-- **Option B**: Reuse the existing `anthropic` secret slot when `LLM_BACKEND=openrouter`. The proxy still pulls the secret by name, just uses it as a Bearer token. Simplest, no OneCLI change, but conflates two semantically-different keys.
-- **Option C**: Plain `.env` variable (`OPENROUTER_API_KEY`) bypassing OneCLI for this one. Reasonable for an experimental backend, less consistent with the rest of the credential story.
-
-User decision sets the shape of Phase 1.
+Phase 1 implementation — small CR (one file + test + .env.example update). Awaiting greenlight to write code on this branch.
