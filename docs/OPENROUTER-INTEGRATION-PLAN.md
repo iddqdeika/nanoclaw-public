@@ -247,11 +247,38 @@ Updated scope given the OneCLI discovery:
 
 That's it. Phases 2-6 unchanged.
 
+## Phase 4 partial — GLM live-test failure (2026-05-20)
+
+Setup: reserve switched to `LLM_BACKEND=openrouter`, `OPENROUTER_API_KEY=…`, all four SDK default-model overrides set to `z-ai/glm-4.6v`, fallback chain `z-ai/glm-4.6v,anthropic/claude-sonnet-4.6`. Container spawned with the right env (verified via container-run.log dump).
+
+First test message: agent-runner received the SDK `result` event with `subtype: success` but `result: "Cannot read properties of undefined (reading 'input_tokens')"`. Stderr showed only `[msg #1 init] → [msg #2 assistant] → [msg #3 result]` — query aborted on the first turn after just one assistant message.
+
+Diagnosis: the Claude Agent SDK throws internally while processing GLM's response shape. Most likely culprits (any one of which would produce this exact error):
+
+- GLM's terminal `message_delta` event lacks the `usage` field the SDK expects to read `.input_tokens` from.
+- GLM's `usage` block doesn't include `cache_creation.ephemeral_5m_input_tokens.input_tokens` (Anthropic-specific nested breakdown the SDK reads unguarded).
+- GLM emits a different terminal event order, leaving the SDK's accumulator dereferencing an undefined `currentMessage`.
+
+Phase 0 raw-curl tests passed because they only validated wire shape. The SDK's internal usage/cost bookkeeping is stricter than the wire protocol's surface.
+
+Not fixable on our side without forking the SDK or inserting a response-rewriting middleware in the credential proxy. Both were out of scope per the plan.
+
+Switching SDK overrides to `anthropic/claude-sonnet-4.6` (via OR routing to Anthropic 1P) to confirm the infra is sound and the failure is GLM-specific. Pending user re-test.
+
+If Anthropic-via-OR works (expected): GLM through Anthropic Skin is **not usable with Claude Agent SDK** for our agent loop. Two paths from there:
+
+- **Park GLM** — document as a known gap; recommend Anthropic models when LLM_BACKEND=openrouter. Cost-savings story via OR collapses to "Anthropic Sonnet through OR" which is exactly the same price as direct.
+- **Try sibling GLM models** — `z-ai/glm-4.7` and `z-ai/glm-5` may have different response shapes; cheap to test, same env config.
+- **Phase 4b: response middleware** — extend the proxy to detect non-Anthropic responses (`provider` field in `message_start`) and normalize the usage block before forwarding. Significant work; punts on tool_use shape differences and streaming event-order issues. Probably not worth it for one model family.
+
 ## Decision log
 
 - 2026-05-20 — Plan drafted, branch `wip/openrouter` created.
-- 2026-05-20 — Phase 0 POC run against `z-ai/glm-4.6v`. All four tests pass on the Anthropic Skin. Greenlight Phase 1.
+- 2026-05-20 — Phase 0 POC run against `z-ai/glm-4.6v`. All four wire-level tests pass on the Anthropic Skin. Greenlight Phase 1.
 - 2026-05-20 — Secret storage: Option A via OneCLI `generic` type. No custom OneCLI type needed. Proxy-side auth swap not needed.
+- 2026-05-20 — Phases 1-3 shipped: backend-aware proxy + fallback chain + error classifier (5 commits).
+- 2026-05-20 — Plumbed SDK default-model overrides (ANTHROPIC_DEFAULT_*_MODEL, CLAUDE_CODE_SUBAGENT_MODEL) into container env.
+- 2026-05-20 — Phase 4 GLM live-test: failed on `z-ai/glm-4.6v`. SDK throws on response shape. Switching to Claude-via-OR to confirm infra; GLM story TBD pending Phase 4 decision above.
 
 ## Next action
 
