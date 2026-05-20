@@ -32,6 +32,42 @@ const BACKEND_DEFAULT_URL: Record<LlmBackend, string> = {
   openrouter: 'https://openrouter.ai/api',
 };
 
+/**
+ * Pipe an upstream SSE stream to the client, dropping the OpenRouter-only
+ * trailing `event: data\ndata: [DONE]` chunk that breaks Claude Code's
+ * strict Anthropic SSE parser. Buffers by line so a chunk boundary inside
+ * the marker doesn't smuggle half of it through.
+ */
+function pipeStrippingDoneEvent(
+  upstream: NodeJS.ReadableStream,
+  downstream: NodeJS.WritableStream,
+): void {
+  let leftover = '';
+  upstream.on('data', (chunk: Buffer) => {
+    const combined = leftover + chunk.toString('utf-8');
+    const lastBoundary = combined.lastIndexOf('\n\n');
+    const ready = lastBoundary === -1 ? '' : combined.slice(0, lastBoundary + 2);
+    leftover = lastBoundary === -1 ? combined : combined.slice(lastBoundary + 2);
+    if (ready) {
+      const filtered = ready
+        .split('\n\n')
+        .filter((evt) => evt && !/^event:\s*data\s*\n\s*data:\s*\[DONE\]/.test(evt))
+        .join('\n\n');
+      if (filtered) downstream.write(filtered + (ready.endsWith('\n\n') ? '\n\n' : ''));
+    }
+  });
+  upstream.on('end', () => {
+    if (leftover && !/^event:\s*data\s*\n\s*data:\s*\[DONE\]/.test(leftover)) {
+      downstream.write(leftover);
+    }
+    downstream.end();
+  });
+  upstream.on('error', (err) => {
+    logger.error({ err }, 'OR SSE filter upstream error');
+    downstream.end();
+  });
+}
+
 export interface ProxyConfig {
   authMode: AuthMode;
 }
@@ -318,17 +354,43 @@ export function startCredentialProxy(
           }
         }
 
+        // Concatenate the upstream URL's path component with the request
+        // path. Anthropic is hosted at the root (no path), so this is a
+        // no-op for the default backend. OpenRouter lives under `/api`,
+        // so the SDK's `/v1/messages` must become `/api/v1/messages` —
+        // otherwise it hits openrouter.ai's marketing landing page and
+        // the CLI tries to parse HTML as a Messages-API response (the
+        // failure surfaces as "Cannot read properties of undefined
+        // (reading 'input_tokens')" inside Claude Code's stream parser).
+        const upstreamBasePath = upstreamUrl.pathname.replace(/\/$/, '');
+        const upstreamPath = upstreamBasePath + (req.url || '/');
         const upstream = makeRequest(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: upstreamPath,
             method: req.method,
             headers,
           } as RequestOptions,
           (upRes) => {
             res.writeHead(upRes.statusCode!, upRes.headers);
-            upRes.pipe(res);
+            // OpenRouter's Anthropic Skin appends an OpenAI-style
+            // `event: data\ndata: [DONE]` chunk after the spec-correct
+            // `event: message_stop`. Claude Code's SSE parser is strict
+            // and throws on the unknown event, surfacing as
+            // "Cannot read properties of undefined (reading 'input_tokens')"
+            // in the CLI's downstream state machine. Strip it on the way
+            // back out — Anthropic's own API never sends [DONE].
+            if (
+              backend === 'openrouter' &&
+              String(upRes.headers['content-type'] || '').includes(
+                'text/event-stream',
+              )
+            ) {
+              pipeStrippingDoneEvent(upRes, res);
+            } else {
+              upRes.pipe(res);
+            }
           },
         );
 
