@@ -17,6 +17,7 @@ import {
   MCP_GATEWAY_PORT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { getGatewayInstance } from './mcp-gateway/instance.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -419,6 +420,15 @@ function buildContainerArgs(
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
+  // SDK default-model overrides (host .env) — propagated to container env
+  // further down so the Claude Agent SDK picks them up at query time.
+  const envOverrides = readEnvFile([
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'CLAUDE_CODE_SUBAGENT_MODEL',
+  ]);
+
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
@@ -456,6 +466,21 @@ function buildContainerArgs(
   const fallbackChain = getFallbackChain();
   if (fallbackChain.length > 0) {
     args.push('-e', `NANOCLAW_MODEL_PRIORITY=${fallbackChain.join(',')}`);
+  }
+
+  // SDK default-model overrides — propagate from host env to container.
+  // The Claude Agent SDK reads these to override its built-in defaults
+  // for each tier. Useful when LLM_BACKEND=openrouter to force a
+  // non-Anthropic model (e.g. z-ai/glm-4.6v) instead of falling back
+  // to the SDK's hardcoded Sonnet/Opus/Haiku names.
+  for (const k of [
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'CLAUDE_CODE_SUBAGENT_MODEL',
+  ] as const) {
+    const v = process.env[k] || envOverrides[k];
+    if (v) args.push('-e', `${k}=${v}`);
   }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
